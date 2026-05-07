@@ -1,0 +1,1050 @@
+#!/bin/bash
+################################################################################
+# calctl - Caldera Control CLI
+# 
+# Command-line tool for managing Caldera operations in security training labs
+# and adversary emulation exercises. Provides a user-friendly interface to the 
+# Caldera REST API with built-in workflows for automation.
+#
+# Version: 1.0.0
+# Date: 2026-05-06
+################################################################################
+
+set -euo pipefail
+
+# CLI version
+CALCTL_VERSION="1.0.0"
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Check multiple locations for library file (supports dev, user, and system-wide installs)
+if [ -f "$SCRIPT_DIR/caldera_api_lib.sh" ]; then
+    # Development mode: library in same directory as executable
+    LIB_FILE="$SCRIPT_DIR/caldera_api_lib.sh"
+elif [ -f "/usr/local/lib/calctl/caldera_api_lib.sh" ]; then
+    # System-wide install: /usr/local/bin/calctl + /usr/local/lib/calctl/
+    LIB_FILE="/usr/local/lib/calctl/caldera_api_lib.sh"
+elif [ -f "$HOME/.local/lib/calctl/caldera_api_lib.sh" ]; then
+    # User install: ~/.local/bin/calctl + ~/.local/lib/calctl/
+    LIB_FILE="$HOME/.local/lib/calctl/caldera_api_lib.sh"
+else
+    # Fallback to same directory (will error later if not found)
+    LIB_FILE="$SCRIPT_DIR/caldera_api_lib.sh"
+fi
+
+# Config file paths
+SYSTEM_CONFIG="/etc/calctl/config"
+USER_CONFIG="${HOME}/.config/calctl/config"
+
+# Global flags
+VERBOSE=0
+QUIET=0
+NO_COLOR=0
+DRY_RUN=0
+FORMAT="table"
+
+# Color codes (will be disabled if NO_COLOR=1)
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+################################################################################
+# Helper Functions
+################################################################################
+
+# Function: Load configuration files
+load_config() {
+    verbose "Loading configuration..."
+    
+    # Load system config if exists
+    if [ -f "$SYSTEM_CONFIG" ]; then
+        verbose "Loading system config: $SYSTEM_CONFIG"
+        source "$SYSTEM_CONFIG"
+    fi
+    
+    # Load user config if exists (overrides system)
+    if [ -f "$USER_CONFIG" ]; then
+        verbose "Loading user config: $USER_CONFIG"
+        source "$USER_CONFIG"
+    fi
+    
+    # Environment variables override everything
+    if [ -n "${CALDERA_API_URL:-}" ]; then
+        verbose "Using CALDERA_API_URL from environment"
+        CALDERA_API="$CALDERA_API_URL"
+    fi
+    
+    if [ -n "${CALDERA_API_KEY:-}" ]; then
+        verbose "Using CALDERA_API_KEY from environment"
+        API_KEY="$CALDERA_API_KEY"
+    fi
+    
+    if [ -n "${ADVERSARY_INVENTORY_PATH:-}" ]; then
+        verbose "Using ADVERSARY_INVENTORY_PATH from environment"
+        ADVERSARY_INVENTORY="$ADVERSARY_INVENTORY_PATH"
+    fi
+}
+
+# Function: Print colored output (respects NO_COLOR)
+print_color() {
+    local color="$1"
+    shift
+    if [ "$NO_COLOR" -eq 1 ]; then
+        echo "$@"
+    else
+        echo -e "${color}$@${NC}"
+    fi
+}
+
+# Function: Print verbose output
+verbose() {
+    if [ "$VERBOSE" -eq 1 ]; then
+        print_color "$BLUE" "[VERBOSE] $*"
+    fi
+}
+
+# Function: Print error
+error() {
+    print_color "$RED" "[ERROR] $*" >&2
+}
+
+# Function: Print warning
+warning() {
+    print_color "$YELLOW" "[WARNING] $*"
+}
+
+# Function: Print success
+success() {
+    print_color "$GREEN" "[SUCCESS] $*"
+}
+
+################################################################################
+# Help Functions
+################################################################################
+
+show_version() {
+    echo "calctl version $CALCTL_VERSION"
+    echo ""
+    echo "Dependencies:"
+    echo "  bash:   $(bash --version | head -n1)"
+    echo "  curl:   $(curl --version | head -n1)"
+    echo "  jq:     $(jq --version 2>/dev/null || echo 'not installed')"
+}
+
+show_help() {
+    cat << 'EOF'
+calctl - Caldera Control CLI
+
+USAGE:
+    calctl [OPTIONS] <COMMAND>
+
+OPTIONS:
+    -h, --help              Show this help message
+    -v, --version           Show version information
+    --verbose               Enable verbose output
+    --quiet                 Suppress non-essential output
+    --no-color              Disable colored output
+    --dry-run               Preview operations without executing them
+    --format <type>         Output format: table, json, summary (default: table)
+
+COMMANDS:
+    agent       Manage Caldera agents
+    operation   Manage Caldera operations
+    lab         Run lab workflows
+    inventory   Manage adversary inventory
+    config      Manage configuration
+
+Run 'calctl <command> --help' for more information on a command.
+
+EXAMPLES:
+    # Check agent health
+    calctl agent check
+
+    # Run a lab operation
+    calctl lab run esend 3.2a
+
+    # List available labs
+    calctl inventory labs esend
+
+    # Show operation status
+    calctl operation status <operation-id>
+EOF
+}
+
+show_agent_help() {
+    cat << 'EOF'
+calctl agent - Manage Caldera agents
+
+USAGE:
+    calctl agent <SUBCOMMAND>
+
+SUBCOMMANDS:
+    list        List all connected agents
+    check       Check for Windows agent and health status
+    wait        Wait for agent to connect
+    get         Get agent details by PAW
+
+EXAMPLES:
+    # Check Windows agent health
+    calctl agent check
+
+    # List all agents
+    calctl agent list
+
+    # Get specific agent details
+    calctl agent get <paw>
+
+    # Wait for agent to connect (5 minute timeout)
+    calctl agent wait 300
+EOF
+}
+
+show_operation_help() {
+    cat << 'EOF'
+calctl operation - Manage Caldera operations
+
+USAGE:
+    calctl operation <SUBCOMMAND>
+
+SUBCOMMANDS:
+    create      Create a new operation
+    list        List all operations
+    status      Get operation status
+    resume      Resume a paused operation
+    pause       Pause a running operation
+    monitor     Monitor operation until complete
+    summary     Show operation execution summary
+    failures    Show detailed failure analysis
+    export      Export operation results to JSON
+    delete      Delete an operation
+
+EXAMPLES:
+    # Create operation
+    calctl operation create "Lab 3.2(A)" <adversary-id>
+
+    # Monitor operation
+    calctl operation monitor <operation-id>
+
+    # Show execution summary
+    calctl operation summary <operation-id>
+
+    # Export results
+    calctl operation export <operation-id> results.json
+
+    # Delete operation
+    calctl operation delete <operation-id>
+EOF
+}
+
+show_lab_help() {
+    cat << 'EOF'
+calctl lab - Run lab workflows
+
+USAGE:
+    calctl lab <SUBCOMMAND>
+
+SUBCOMMANDS:
+    run         Run lab in automation mode (CI/CD, unattended execution)
+    manual      Run lab in manual mode (interactive, developer testing)
+    list        List available labs for a course
+
+EXAMPLES:
+    # Run lab in automation mode (agent check, create, monitor, export)
+    calctl lab run mycourse lab-01
+
+    # Run with custom output directory
+    calctl lab run mycourse lab-02 /tmp/results
+
+    # Run in manual mode (pause, wait, resume, monitor)
+    calctl lab manual mycourse lab-01 60
+
+    # List available labs
+    calctl lab list mycourse
+
+EXIT CODES:
+    0 = Success (75-100% success rate)
+    1 = Partial success (25-74% success rate)
+    2 = Low success (0-24% success rate)
+    3 = Agent health check failed
+    4 = Operation creation failed
+    5 = Operation timeout
+    6 = Invalid inventory (lab not found)
+EOF
+}
+
+show_inventory_help() {
+    cat << 'EOF'
+calctl inventory - Manage adversary inventory
+
+USAGE:
+    calctl inventory <SUBCOMMAND>
+
+SUBCOMMANDS:
+    init        Initialize inventory from example template
+    validate    Validate inventory JSON structure
+    courses     List all available courses
+    labs        List labs for a specific course
+    show        Show lab metadata
+    add         Add new adversary template (interactive)
+
+EXAMPLES:
+    # Initialize inventory (creates adversaries.json from example)
+    calctl inventory init
+
+    # Validate inventory structure
+    calctl inventory validate
+
+    # List all courses
+    calctl inventory courses
+
+    # List labs for a course
+    calctl inventory labs mycourse
+
+    # Show specific lab metadata
+    calctl inventory show mycourse lab-01
+
+    # Add new adversary template
+    calctl inventory add mycourse
+EOF
+}
+
+show_config_help() {
+    cat << 'EOF'
+calctl config - Manage configuration
+
+USAGE:
+    calctl config <SUBCOMMAND>
+
+SUBCOMMANDS:
+    init        Initialize configuration file
+    show        Show current configuration
+    check       Verify Caldera server connection
+    set         Set configuration value
+
+CONFIGURATION FILES:
+    System: /etc/calctl/config
+    User:   ~/.config/calctl/config
+    
+    Priority: env vars > user config > system config > defaults
+
+ENVIRONMENT VARIABLES:
+    CALDERA_API_URL              Override Caldera API endpoint
+    CALDERA_API_KEY              Override API key
+    ADVERSARY_INVENTORY_PATH     Override inventory file path
+
+EXAMPLES:
+    # Initialize config
+    calctl config init
+
+    # Show current config
+    calctl config show
+
+    # Check Caldera server
+    calctl config check
+    
+    # Set config value
+    calctl config set CALDERA_API_URL http://caldera.example.com:8888/api/rest
+EOF
+}
+
+################################################################################
+# Command Handlers
+################################################################################
+
+# Agent commands
+cmd_agent() {
+    local subcommand="${1:-}"
+    shift || true
+
+    case "$subcommand" in
+        list)
+            if [ "$FORMAT" = "json" ]; then
+                # Call library function and output raw JSON
+                curl -s -X POST "$CALDERA_API" \
+                    -H "KEY: $API_KEY" \
+                    -d '{"index":"agents"}' | jq '.'
+            else
+                list_agents "$@"
+            fi
+            ;;
+        check)
+            check_agent_health "$@"
+            ;;
+        wait)
+            wait_for_agent "$@"
+            ;;
+        get)
+            if [ $# -eq 0 ]; then
+                error "PAW required. Usage: calctl agent get <paw>"
+                return 1
+            fi
+            get_agent "$@"
+            ;;
+        -h|--help|help|"")
+            show_agent_help
+            ;;
+        *)
+            error "Unknown agent subcommand: $subcommand"
+            echo ""
+            show_agent_help
+            return 1
+            ;;
+    esac
+}
+
+# Operation commands
+cmd_operation() {
+    local subcommand="${1:-}"
+    shift || true
+
+    case "$subcommand" in
+        create)
+            if [ $# -lt 2 ]; then
+                error "Usage: calctl operation create <name> <adversary-id>"
+                return 1
+            fi
+            
+            if [ "$DRY_RUN" -eq 1 ]; then
+                echo "[DRY RUN] Would create operation:"
+                echo "  Name: $1"
+                echo "  Adversary ID: $2"
+                echo "  State: paused"
+                return 0
+            fi
+            
+            create_operation "$@"
+            ;;
+        list)
+            if [ "$FORMAT" = "json" ]; then
+                curl -s -X POST "$CALDERA_API" \
+                    -H "KEY: $API_KEY" \
+                    -d '{"index":"operations"}' | jq '.'
+            else
+                list_operations "$@"
+            fi
+            ;;
+        status)
+            if [ $# -eq 0 ]; then
+                error "Operation ID required. Usage: calctl operation status <operation-id>"
+                return 1
+            fi
+            
+            if [ "$FORMAT" = "json" ]; then
+                curl -s -X POST "$CALDERA_API" \
+                    -H "KEY: $API_KEY" \
+                    -d "{\"index\":\"operations\",\"id\":\"$1\"}" | jq '.[0]'
+            else
+                get_operation_status "$@"
+            fi
+            ;;
+        resume)
+            resume_operation "$@"
+            ;;
+        pause)
+            pause_operation "$@"
+            ;;
+        monitor)
+            monitor_operation "$@"
+            ;;
+        summary)
+            get_operation_summary "$@"
+            ;;
+        failures)
+            get_failure_details "$@"
+            ;;
+        export)
+            if [ $# -lt 2 ]; then
+                error "Usage: calctl operation export <operation-id> <output-file>"
+                return 1
+            fi
+            export_operation_results "$@"
+            ;;
+        delete)
+            if [ "$DRY_RUN" -eq 1 ]; then
+                local op_id="${1:-$OPERATION_ID}"
+                if [ -z "$op_id" ]; then
+                    error "Operation ID required"
+                    return 1
+                fi
+                echo "[DRY RUN] Would delete operation: $op_id"
+                return 0
+            fi
+            
+            delete_operation "$@"
+            ;;
+        -h|--help|help|"")
+            show_operation_help
+            ;;
+        *)
+            error "Unknown operation subcommand: $subcommand"
+            echo ""
+            show_operation_help
+            return 1
+            ;;
+    esac
+}
+
+# Lab commands
+cmd_lab() {
+    local subcommand="${1:-}"
+    shift || true
+
+    case "$subcommand" in
+        run)
+            if [ $# -lt 2 ]; then
+                error "Usage: calctl lab run <course> <lab-id> [output-dir]"
+                return 1
+            fi
+            
+            if [ "$DRY_RUN" -eq 1 ]; then
+                local course="$1"
+                local lab_id="$2"
+                local output_dir="${3:-.}"
+                
+                # Auto-load inventory if needed
+                if [ "$INVENTORY_LOADED_STATUS" != "loaded" ]; then
+                    load_adversary_inventory >/dev/null 2>&1
+                fi
+                
+                # Try to get lab metadata
+                local lab_data=$(jq -e ".courses.\"$course\".labs[] | select(.id == \"$lab_id\")" "$ADVERSARY_INVENTORY" 2>/dev/null)
+                
+                if [ -n "$lab_data" ]; then
+                    local lab_name=$(echo "$lab_data" | jq -r '.name' 2>/dev/null)
+                    local adversary_id=$(echo "$lab_data" | jq -r '.adversary_id' 2>/dev/null)
+                    local duration=$(echo "$lab_data" | jq -r '.duration_seconds' 2>/dev/null)
+                    
+                    echo "[DRY RUN] Would run lab automation:"
+                    echo "  Course: $course"
+                    echo "  Lab ID: $lab_id"
+                    echo "  Lab Name: $lab_name"
+                    echo "  Adversary ID: $adversary_id"
+                    echo "  Expected Duration: ~${duration}s"
+                    echo "  Output Directory: $output_dir"
+                    echo ""
+                    echo "Steps:"
+                    echo "  1. Check agent health"
+                    echo "  2. Create operation (running state)"
+                    echo "  3. Monitor execution"
+                    echo "  4. Export results to JSON"
+                    echo "  5. Show failure details (if any)"
+                else
+                    echo "[DRY RUN] Would run lab: $course/$lab_id"
+                    echo "  (Lab metadata not found - would fail)"
+                fi
+                return 0
+            fi
+            
+            run_lab_automated "$@"
+            ;;
+        manual)
+            if [ $# -lt 2 ]; then
+                error "Usage: calctl lab manual <course> <lab-id> [wait-time]"
+                return 1
+            fi
+            local course="$1"
+            local lab_id="$2"
+            local wait_time="${3:-60}"
+            
+            # Get lab metadata
+            local lab_metadata=$(get_lab_metadata "$course" "$lab_id")
+            if [ $? -ne 0 ]; then
+                return 1
+            fi
+            
+            local adversary_id=$(echo "$lab_metadata" | jq -r '.adversary_id')
+            local lab_name=$(echo "$lab_metadata" | jq -r '.name')
+            
+            run_lab_operation "$lab_name" "$adversary_id" "$wait_time"
+            ;;
+        list)
+            if [ $# -eq 0 ]; then
+                error "Course required. Usage: calctl lab list <course>"
+                return 1
+            fi
+            list_inventory_labs "$@"
+            ;;
+        -h|--help|help|"")
+            show_lab_help
+            ;;
+        *)
+            error "Unknown lab subcommand: $subcommand"
+            echo ""
+            show_lab_help
+            return 1
+            ;;
+    esac
+}
+
+# Inventory commands
+cmd_inventory() {
+    local subcommand="${1:-}"
+    shift || true
+
+    case "$subcommand" in
+        init)
+            # Initialize inventory from example template
+            local inventory_file="$ADVERSARY_INVENTORY"
+            local example_file="${inventory_file%.json}.example.json"
+            
+            # Check if example file exists
+            if [ ! -f "$example_file" ]; then
+                # Try alternate locations
+                if [ -f "$SCRIPT_DIR/adversaries.example.json" ]; then
+                    example_file="$SCRIPT_DIR/adversaries.example.json"
+                else
+                    error "Example inventory file not found: $example_file"
+                    return 1
+                fi
+            fi
+            
+            # Check if inventory already exists
+            if [ -f "$inventory_file" ]; then
+                warning "Inventory file already exists: $inventory_file"
+                read -p "Overwrite? (yes/no): " confirm
+                if [ "$confirm" != "yes" ]; then
+                    echo "Initialization cancelled"
+                    return 0
+                fi
+            fi
+            
+            # Copy example to inventory
+            cp "$example_file" "$inventory_file"
+            if [ $? -eq 0 ]; then
+                success "Initialized inventory file: $inventory_file"
+                echo ""
+                echo "Next steps:"
+                echo "  1. Edit $inventory_file to add your courses and labs"
+                echo "  2. Get adversary IDs from Caldera Web UI (Adversaries tab)"
+                echo "  3. Run 'calctl inventory validate' to check JSON structure"
+                echo "  4. Run 'calctl inventory courses' to see your courses"
+            else
+                error "Failed to initialize inventory"
+                return 1
+            fi
+            ;;
+        validate)
+            # Validate inventory JSON structure
+            local inventory_file="$ADVERSARY_INVENTORY"
+            
+            if [ ! -f "$inventory_file" ]; then
+                error "Inventory file not found: $inventory_file"
+                echo ""
+                echo "Run 'calctl inventory init' to create one"
+                return 1
+            fi
+            
+            verbose "Validating inventory: $inventory_file"
+            
+            # Check if jq is available
+            if ! command -v jq &> /dev/null; then
+                error "'jq' command not found"
+                echo ""
+                echo "Install jq to validate JSON:"
+                echo "  macOS:  brew install jq"
+                echo "  Linux:  apt/dnf install jq"
+                return 1
+            fi
+            
+            # Validate JSON syntax
+            if ! jq empty "$inventory_file" 2>/dev/null; then
+                error "Invalid JSON syntax in $inventory_file"
+                echo ""
+                echo "Run: jq . $inventory_file"
+                echo "to see detailed syntax errors"
+                return 1
+            fi
+            
+            # Validate required structure
+            if ! jq -e '.courses' "$inventory_file" >/dev/null 2>&1; then
+                error "Missing required 'courses' object in inventory"
+                return 1
+            fi
+            
+            # Count courses
+            local course_count=$(jq '.courses | keys | length' "$inventory_file")
+            
+            # Validate each course has required fields
+            local errors=0
+            while IFS= read -r course; do
+                # Check for required fields in each lab
+                local lab_errors=$(jq -r ".courses.\"$course\".labs[]? | select(.id == null or .adversary_id == null or .name == null) | .name // \"<unnamed>\"" "$inventory_file" 2>/dev/null)
+                if [ -n "$lab_errors" ]; then
+                    error "Course '$course' has labs with missing required fields (id, adversary_id, name)"
+                    echo "$lab_errors"
+                    errors=$((errors + 1))
+                fi
+            done < <(jq -r '.courses | keys[]' "$inventory_file")
+            
+            if [ $errors -eq 0 ]; then
+                success "Inventory validation passed"
+                echo ""
+                echo "Summary:"
+                echo "  File: $inventory_file"
+                echo "  Courses: $course_count"
+                if [ "$course_count" -gt 0 ]; then
+                    echo ""
+                    echo "Courses:"
+                    jq -r '.courses | to_entries[] | "  - " + .key + ": " + .value.name' "$inventory_file"
+                fi
+            else
+                error "Inventory validation failed with $errors error(s)"
+                return 1
+            fi
+            ;;
+        courses)
+            list_inventory_courses "$@"
+            ;;
+        labs)
+            if [ $# -eq 0 ]; then
+                error "Course required. Usage: calctl inventory labs <course>"
+                return 1
+            fi
+            
+            if [ "$FORMAT" = "json" ]; then
+                # Auto-load inventory if needed
+                if [ "$INVENTORY_LOADED_STATUS" != "loaded" ]; then
+                    load_adversary_inventory >/dev/null 2>&1 || return 1
+                fi
+                jq ".courses.\"$1\".labs" "$ADVERSARY_INVENTORY"
+            else
+                list_inventory_labs "$@"
+            fi
+            ;;
+        show)
+            if [ $# -lt 2 ]; then
+                error "Usage: calctl inventory show <course> <lab-id>"
+                return 1
+            fi
+            
+            if [ "$FORMAT" = "json" ]; then
+                # Auto-load inventory if needed
+                if [ "$INVENTORY_LOADED_STATUS" != "loaded" ]; then
+                    load_adversary_inventory >/dev/null 2>&1 || return 1
+                fi
+                jq -e ".courses.\"$1\".labs[] | select(.id == \"$2\")" "$ADVERSARY_INVENTORY"
+            else
+                get_lab_metadata "$@"
+            fi
+            ;;
+        add)
+            create_adversary_template "$@"
+            ;;
+        -h|--help|help|"")
+            show_inventory_help
+            ;;
+        *)
+            error "Unknown inventory subcommand: $subcommand"
+            echo ""
+            show_inventory_help
+            return 1
+            ;;
+    esac
+}
+
+# Config commands
+cmd_config() {
+    local subcommand="${1:-}"
+    shift || true
+
+    case "$subcommand" in
+        init)
+            # Create config directory if it doesn't exist
+            local config_dir="$(dirname "$USER_CONFIG")"
+            if [ ! -d "$config_dir" ]; then
+                mkdir -p "$config_dir"
+                verbose "Created config directory: $config_dir"
+            fi
+            
+            # Create default config file
+            cat > "$USER_CONFIG" << 'EOF'
+# calctl configuration file
+# This file is sourced by calctl, so use bash syntax
+
+# Caldera API endpoint
+# Default: http://localhost:8888/api/rest
+#CALDERA_API="http://localhost:8888/api/rest"
+
+# Caldera API key
+# SECURITY NOTE: Do not hardcode API keys in this file!
+# Instead, use the CALDERA_API_KEY environment variable:
+#   export CALDERA_API_KEY="your-api-key-here"
+# Or let calctl auto-detect from /opt/caldera/conf/local.yml
+
+# Adversary inventory file path
+# Default: <script-dir>/adversaries.json
+#ADVERSARY_INVENTORY="/path/to/adversaries.json"
+
+# Output preferences
+#NO_COLOR=0
+#VERBOSE=0
+#QUIET=0
+EOF
+            
+            success "Configuration file created: $USER_CONFIG"
+            echo ""
+            echo "Edit this file to customize your settings, or use:"
+            echo "  calctl config set <key> <value>"
+            ;;
+        show)
+            echo "Configuration Sources:"
+            echo ""
+            
+            # Show which config files exist
+            if [ -f "$SYSTEM_CONFIG" ]; then
+                echo "  System config: $SYSTEM_CONFIG (exists)"
+            else
+                echo "  System config: $SYSTEM_CONFIG (not found)"
+            fi
+            
+            if [ -f "$USER_CONFIG" ]; then
+                echo "  User config:   $USER_CONFIG (exists)"
+            else
+                echo "  User config:   $USER_CONFIG (not found)"
+            fi
+            
+            echo ""
+            echo "Current Configuration:"
+            echo ""
+            
+            # Show current values
+            echo "  CALDERA_API: ${CALDERA_API:-http://localhost:8888/api/rest}"
+            if [ -n "${CALDERA_API_URL:-}" ]; then
+                echo "    (from CALDERA_API_URL environment variable)"
+            fi
+            
+            if [ -n "${API_KEY:-}" ]; then
+                echo "  API_KEY: ${API_KEY:0:8}... (masked)"
+                if [ -n "${CALDERA_API_KEY:-}" ]; then
+                    echo "    (from CALDERA_API_KEY environment variable)"
+                fi
+            else
+                echo "  API_KEY: (not set)"
+            fi
+            
+            echo "  ADVERSARY_INVENTORY: ${ADVERSARY_INVENTORY:-$SCRIPT_DIR/adversaries.json}"
+            if [ -n "${ADVERSARY_INVENTORY_PATH:-}" ]; then
+                echo "    (from ADVERSARY_INVENTORY_PATH environment variable)"
+            fi
+            
+            echo ""
+            echo "Flags:"
+            echo "  VERBOSE: $VERBOSE"
+            echo "  QUIET: $QUIET"
+            echo "  NO_COLOR: $NO_COLOR"
+            ;;
+        check)
+            check_caldera_server
+            ;;
+        set)
+            if [ $# -lt 2 ]; then
+                error "Usage: calctl config set <key> <value>"
+                echo ""
+                echo "Available keys:"
+                echo "  CALDERA_API"
+                echo "  ADVERSARY_INVENTORY"
+                echo "  NO_COLOR"
+                echo "  VERBOSE"
+                echo "  QUIET"
+                echo ""
+                echo "Note: Use CALDERA_API_KEY environment variable for API key (not in config file)"
+                return 1
+            fi
+            
+            local key="$1"
+            local value="$2"
+            
+            # Validate key
+            case "$key" in
+                CALDERA_API|ADVERSARY_INVENTORY|NO_COLOR|VERBOSE|QUIET)
+                    ;;
+                API_KEY)
+                    error "Do not set API_KEY in config file for security reasons"
+                    echo ""
+                    echo "Use environment variable instead:"
+                    echo "  export CALDERA_API_KEY=\"your-api-key-here\""
+                    echo ""
+                    echo "Or let calctl auto-detect from /opt/caldera/conf/local.yml"
+                    return 1
+                    ;;
+                *)
+                    error "Invalid configuration key: $key"
+                    return 1
+                    ;;
+            esac
+            
+            # Ensure config file exists
+            if [ ! -f "$USER_CONFIG" ]; then
+                cmd_config init >/dev/null
+            fi
+            
+            # Check if key already exists in config
+            if grep -q "^${key}=" "$USER_CONFIG" 2>/dev/null; then
+                # Update existing value (macOS and Linux compatible)
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    sed -i '' "s|^${key}=.*|${key}=\"${value}\"|" "$USER_CONFIG"
+                else
+                    sed -i "s|^${key}=.*|${key}=\"${value}\"|" "$USER_CONFIG"
+                fi
+                success "Updated $key in $USER_CONFIG"
+            elif grep -q "^#${key}=" "$USER_CONFIG" 2>/dev/null; then
+                # Uncomment and set value
+                if [[ "$OSTYPE" == "darwin"* ]]; then
+                    sed -i '' "s|^#${key}=.*|${key}=\"${value}\"|" "$USER_CONFIG"
+                else
+                    sed -i "s|^#${key}=.*|${key}=\"${value}\"|" "$USER_CONFIG"
+                fi
+                success "Set $key in $USER_CONFIG"
+            else
+                # Add new key
+                echo "${key}=\"${value}\"" >> "$USER_CONFIG"
+                success "Added $key to $USER_CONFIG"
+            fi
+            ;;
+        -h|--help|help|"")
+            show_config_help
+            ;;
+        *)
+            error "Unknown config subcommand: $subcommand"
+            echo ""
+            show_config_help
+            return 1
+            ;;
+    esac
+}
+
+################################################################################
+# Main Entry Point
+################################################################################
+
+main() {
+    # Parse global flags
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)
+                show_help
+                exit 0
+                ;;
+            -v|--version)
+                show_version
+                exit 0
+                ;;
+            --verbose)
+                VERBOSE=1
+                shift
+                ;;
+            --quiet)
+                QUIET=1
+                shift
+                ;;
+            --no-color)
+                NO_COLOR=1
+                # Update color codes
+                RED=''
+                GREEN=''
+                YELLOW=''
+                BLUE=''
+                NC=''
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=1
+                shift
+                ;;
+            --format)
+                if [ $# -lt 2 ]; then
+                    error "--format requires an argument: table, json, or summary"
+                    exit 1
+                fi
+                FORMAT="$2"
+                case "$FORMAT" in
+                    table|json|summary)
+                        ;;
+                    *)
+                        error "Invalid format: $FORMAT (must be table, json, or summary)"
+                        exit 1
+                        ;;
+                esac
+                shift 2
+                ;;
+            -*)
+                error "Unknown option: $1"
+                echo ""
+                show_help
+                exit 1
+                ;;
+            *)
+                # This is the command
+                break
+                ;;
+        esac
+    done
+
+    # Source the library file
+    if [ ! -f "$LIB_FILE" ]; then
+        error "Library file not found: $LIB_FILE"
+        exit 1
+    fi
+
+    verbose "Sourcing library: $LIB_FILE"
+    
+    # Disable auto-init from library
+    export CALDERA_AUTO_INIT=0
+    
+    # Export color settings for library functions
+    export RED GREEN YELLOW BLUE NC
+    
+    # Export flags for library functions to use
+    export DRY_RUN FORMAT VERBOSE QUIET
+    
+    source "$LIB_FILE"
+
+    # Load configuration files and environment variables
+    load_config
+
+    # Auto-initialize API key if not set
+    if [ -z "${API_KEY:-}" ]; then
+        verbose "API key not set, attempting auto-initialization..."
+        if [ -f "/opt/caldera/conf/local.yml" ]; then
+            set_api_key >/dev/null 2>&1 || true
+        fi
+    fi
+
+    # Get the command
+    local command="${1:-}"
+    shift || true
+
+    # Route to command handler
+    case "$command" in
+        agent)
+            cmd_agent "$@"
+            ;;
+        operation)
+            cmd_operation "$@"
+            ;;
+        lab)
+            cmd_lab "$@"
+            ;;
+        inventory)
+            cmd_inventory "$@"
+            ;;
+        config)
+            cmd_config "$@"
+            ;;
+        -h|--help|help|"")
+            show_help
+            ;;
+        *)
+            error "Unknown command: $command"
+            echo ""
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+# Run main function
+main "$@"

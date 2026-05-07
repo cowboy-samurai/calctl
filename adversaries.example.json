@@ -1,0 +1,66 @@
+{
+  "_comment": "Caldera Adversary Profiles Inventory - Example Template. Copy this to adversaries.json and customize for your training courses.",
+  "_format": {
+    "courses": {
+      "<course_code>": {
+        "name": "Full course name",
+        "organization": "Organization or vendor name (optional)",
+        "description": "Course description (optional)",
+        "labs": [
+          {
+            "id": "Lab identifier (e.g., 1.1, 2.3a, module-01)",
+            "adversary_id": "Caldera adversary UUID from Caldera UI",
+            "name": "Descriptive lab name",
+            "abilities": "Number of abilities in adversary profile",
+            "duration_seconds": "Estimated execution time in seconds",
+            "success_rate": "Expected success rate percentage",
+            "notes": "Additional context or observations"
+          }
+        ]
+      }
+    }
+  },
+  "_last_updated": "2026-05-06",
+  "courses": {
+    "example-course-01": {
+      "name": "Example Red Team Course",
+      "organization": "Your Organization",
+      "description": "Example course demonstrating adversary emulation techniques",
+      "labs": [
+        {
+          "id": "lab-01",
+          "adversary_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+          "name": "Example Lab: Initial Access",
+          "abilities": 3,
+          "duration_seconds": 120,
+          "success_rate": "90%",
+          "notes": "Replace with your actual lab details"
+        },
+        {
+          "id": "lab-02",
+          "adversary_id": "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy",
+          "name": "Example Lab: Persistence",
+          "abilities": 5,
+          "duration_seconds": 180,
+          "success_rate": "85%",
+          "notes": "Replace with your actual lab details"
+        }
+      ]
+    },
+    "example-course-02": {
+      "name": "Example MITRE ATT&CK Training",
+      "description": "Example course covering specific ATT&CK techniques",
+      "labs": [
+        {
+          "id": "T1059",
+          "adversary_id": "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz",
+          "name": "Example: Command and Scripting Interpreter",
+          "abilities": 4,
+          "duration_seconds": 90,
+          "success_rate": "80%",
+          "notes": "Replace with your actual technique demonstration"
+        }
+      ]
+    }
+  }
+}
